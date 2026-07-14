@@ -492,9 +492,28 @@ app.patch('/api/orders/:id/cancel', ...action(['pro', 'admin'], async (req, res)
 
 /* ------------------------------------------------------- notifications ---- */
 
+const notificationsFor = req =>
+  (req.user.role === 'user' ? { patient: req.user.id } : { staff: req.user.id });
+
+// The bell is a live feed, not an archive. By default it returns only what the
+// reader has not seen yet — a dashboard left open all day was showing thirty-odd
+// items, so the one that had just arrived was buried.
+// ?all=1 returns the recent history.
 app.get('/api/notifications', auth, wrap(async (req, res) => {
-  const filter = req.user.role === 'user' ? { patient: req.user.id } : { staff: req.user.id };
-  res.json(await Notification.find(filter).sort('-createdAt').limit(50));
+  const filter = notificationsFor(req);
+  if (req.query.all !== '1') filter.read = false;
+
+  res.json(await Notification.find(filter)
+    .sort('-createdAt')
+    .limit(req.query.all === '1' ? 50 : 20));
+}));
+
+app.patch('/api/notifications/read-all', auth, wrap(async (req, res) => {
+  const { modifiedCount } = await Notification.updateMany(
+    { ...notificationsFor(req), read: false },
+    { read: true },
+  );
+  res.json({ ok: true, cleared: modifiedCount });
 }));
 
 app.patch('/api/notifications/:id/read', auth, wrap(async (req, res) => {

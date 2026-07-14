@@ -494,6 +494,29 @@ test('notifications carry both languages', async () => {
   assert.notEqual(note.message, note.messageEn);
 });
 
+// The bell is a live feed, not an archive: a dashboard left open all day had built
+// up thirty-odd items and the newest one was buried.
+test('the bell shows only unread, and can be cleared', async () => {
+  const admin = await staffToken('admin', 'admin123');
+
+  const unread = await api('GET', '/api/notifications', { token: admin });
+  assert.ok(unread.body.length > 0, 'there is something to see');
+  assert.ok(unread.body.every(n => n.read === false), 'only unread by default');
+
+  const history = await api('GET', '/api/notifications?all=1', { token: admin });
+  assert.ok(history.body.length >= unread.body.length, 'history is still reachable');
+
+  const cleared = await api('PATCH', '/api/notifications/read-all', { token: admin });
+  assert.equal(cleared.status, 200);
+  assert.ok(cleared.body.cleared > 0, `cleared ${cleared.body.cleared}`);
+
+  const after = await api('GET', '/api/notifications', { token: admin });
+  assert.equal(after.body.length, 0, 'the bell is empty once everything is read');
+
+  const stillThere = await api('GET', '/api/notifications?all=1', { token: admin });
+  assert.ok(stillThere.body.length > 0, 'but nothing was deleted');
+});
+
 test('admin stats are computed from live orders', async () => {
   const admin = await staffToken('admin', 'admin123');
   const { status, body } = await api('GET', '/api/admin/stats/today', { token: admin });
