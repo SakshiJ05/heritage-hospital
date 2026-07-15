@@ -72,8 +72,13 @@ const STEP_INDEX = {
 const stepIndex = status => STEP_INDEX[status] ?? 0;
 
 // Which statuses each staff role sees in its work queue by default.
+//
+// CONFIRMED stays in the PRO queue: when more prescriptions arrive than there are
+// free agents, the PRO confirms them but cannot assign an agent yet. Those orders
+// must remain visible so the PRO can assign one the moment an agent frees up —
+// otherwise a confirmed-but-unassigned order would silently drop out of every queue.
 const QUEUES = {
-  pro: [STATUS.SUBMITTED, STATUS.PRO_REVIEW],
+  pro: [STATUS.SUBMITTED, STATUS.PRO_REVIEW, STATUS.CONFIRMED],
   agent: [STATUS.AGENT_ASSIGNED],
   lab: [STATUS.SAMPLE_COLLECTED, STATUS.LAB_RECEIVED],
 };
