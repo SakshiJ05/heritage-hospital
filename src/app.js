@@ -60,6 +60,13 @@ const dayKey = date => new Intl.DateTimeFormat('en-CA', {
 const periodStart = period => {
   const [y, m, d] = dayKey(new Date()).split('-');
   if (period === 'today') return new Date(`${y}-${m}-${d}T00:00:00+05:30`);
+  if (period === 'week') {
+    // Rolling seven days: today plus the six days before it.
+    const ago = new Date();
+    ago.setDate(ago.getDate() - 6);
+    const [wy, wm, wd] = dayKey(ago).split('-');
+    return new Date(`${wy}-${wm}-${wd}T00:00:00+05:30`);
+  }
   if (period === 'month') return new Date(`${y}-${m}-01T00:00:00+05:30`);
   if (period === 'year') return new Date(`${y}-01-01T00:00:00+05:30`);
   return null;
