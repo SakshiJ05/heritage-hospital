@@ -11,7 +11,11 @@ const secret = () => {
   return value;
 };
 
-const sign = payload => jwt.sign(payload, secret(), { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+// 90 days by default: a field worker or a patient should not be logged out for
+// being idle over a weekend. Override with JWT_EXPIRES_IN if a shorter life is
+// wanted. The app also stops tearing down the session on a stray 401 (see
+// client.ts), so together an open session survives until the user taps Log out.
+const sign = payload => jwt.sign(payload, secret(), { expiresIn: process.env.JWT_EXPIRES_IN || '90d' });
 
 const auth = (req, res, next) => {
   try {

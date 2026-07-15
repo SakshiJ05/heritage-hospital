@@ -40,6 +40,14 @@ app.use('/uploads', express.static(uploadRoot));
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const fail = (status, code, message) => Object.assign(new Error(code), { status, code, message });
 
+// A real Indian mobile number: exactly ten digits, and the first is 6-9. Every
+// live SIM-issued mobile falls in that range, so this rejects the junk that a plain
+// length check waves through — 0000000000, 1234567890, a landline STD code — while
+// still accepting every genuine number. Callers pass the already-\D-stripped string.
+const PHONE_RE = /^[6-9]\d{9}$/;
+const isValidPhone = phone => PHONE_RE.test(phone);
+const INVALID_PHONE_MSG = 'सही 10 अंकों का मोबाइल नंबर डालें।';
+
 // The clinic's day, not the server's. Analytics group by this, and the trend loop
 // builds its keys with the same function, so the two always line up.
 const TZ = process.env.TZ_NAME || 'Asia/Kolkata';
@@ -87,7 +95,7 @@ app.post('/api/auth/register', wrap(async (req, res) => {
   const address = String(req.body.address || '').trim();
   const password = String(req.body.password || '');
 
-  if (phone.length !== 10) throw fail(400, 'invalid_phone', '10 अंकों का मोबाइल नंबर डालें।');
+  if (!isValidPhone(phone)) throw fail(400, 'invalid_phone', INVALID_PHONE_MSG);
   if (name.length < 2) throw fail(400, 'name_required', 'अपना पूरा नाम डालें।');
   if (!village) throw fail(400, 'village_required', 'अपना शहर / गाँव डालें।');
   if (address.length < 5) throw fail(400, 'address_required', 'पूरा पता डालें ताकि एजेंट पहुँच सके।');
@@ -116,7 +124,7 @@ app.post('/api/auth/login', wrap(async (req, res) => {
   const password = String(req.body.password || '');
   const wrong = () => fail(401, 'invalid_login', 'मोबाइल नंबर या पासवर्ड गलत है।');
 
-  if (phone.length !== 10 || !password) throw wrong();
+  if (!isValidPhone(phone) || !password) throw wrong();
 
   const patient = await Patient.findOne({ phone });
   if (!patient?.password) throw wrong();
@@ -150,7 +158,7 @@ app.post('/api/auth/login', wrap(async (req, res) => {
 // nameless and address-less.
 app.post('/api/auth/send-otp', wrap(async (req, res) => {
   const phone = String(req.body.phone || '').replace(/\D/g, '');
-  if (phone.length !== 10) throw fail(400, 'invalid_phone', '10 अंकों का मोबाइल नंबर डालें।');
+  if (!isValidPhone(phone)) throw fail(400, 'invalid_phone', INVALID_PHONE_MSG);
 
   const patient = await Patient.findOne({ phone });
   if (!patient || !patient.name || patient.name === 'ग्राहक' || !patient.address) {
@@ -298,7 +306,12 @@ app.get('/api/orders/:id', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(asy
 }));
 
 app.get('/api/staff/agents', auth, allow('pro', 'admin'), wrap(async (req, res) => {
-  const filter = { role: 'agent', active: true, ...(req.query.zone && { zone: req.query.zone }) };
+  // Match agents in the patient's zone, plus anyone whose zone is 'All' — a
+  // small operation often runs one or two agents who cover the whole city, and an
+  // exact-zone-only filter would hide them for every village but the one they were
+  // labelled with, leaving the PRO staring at "no agents".
+  const filter = { role: 'agent', active: true };
+  if (req.query.zone) filter.$or = [{ zone: req.query.zone }, { zone: 'All' }];
   const agents = await Staff.find(filter).select('-password -pushToken').lean();
 
   // An agent is BUSY while they are carrying an order: from the moment one is
@@ -682,7 +695,7 @@ app.post('/api/admin/staff', auth, allow('admin'), wrap(async (req, res) => {
   if (password.length < 6) throw fail(400, 'weak_password', 'पासवर्ड कम से कम 6 अक्षर का रखें।');
   // The UI caps the field at ten digits; the server enforces it, because a staff
   // phone is what the SMS gateway will actually dial.
-  if (phone.length !== 10) throw fail(400, 'invalid_phone', '10 अंकों का मोबाइल नंबर डालें।');
+  if (!isValidPhone(phone)) throw fail(400, 'invalid_phone', INVALID_PHONE_MSG);
 
   if (await Staff.findOne({ username })) {
     throw fail(409, 'username_taken', 'यह username पहले से मौजूद है।');
@@ -712,7 +725,7 @@ app.patch('/api/admin/staff/:id', auth, allow('admin'), wrap(async (req, res) =>
   if (req.body.zone) staff.zone = String(req.body.zone).trim();
   if (req.body.phone) {
     const phone = String(req.body.phone).replace(/\D/g, '');
-    if (phone.length !== 10) throw fail(400, 'invalid_phone', '10 अंकों का मोबाइल नंबर डालें।');
+    if (!isValidPhone(phone)) throw fail(400, 'invalid_phone', INVALID_PHONE_MSG);
     staff.phone = phone;
   }
   if (req.body.password) {
