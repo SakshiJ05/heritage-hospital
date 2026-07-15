@@ -70,8 +70,19 @@ const periodStart = period => {
 const paginatedList = async (Model, baseFilter, req) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
-  const since = periodStart(req.query.period);
-  const filter = { ...baseFilter, ...(since && { createdAt: { $gte: since } }) };
+
+  // A custom from/to date range wins over the quick today/month/year period. Dates
+  // arrive as YYYY-MM-DD and are read as clinic-timezone day boundaries.
+  let createdAt;
+  if (req.query.from || req.query.to) {
+    createdAt = {};
+    if (req.query.from) createdAt.$gte = new Date(`${req.query.from}T00:00:00+05:30`);
+    if (req.query.to) createdAt.$lte = new Date(`${req.query.to}T23:59:59.999+05:30`);
+  } else {
+    const since = periodStart(req.query.period);
+    if (since) createdAt = { $gte: since };
+  }
+  const filter = { ...baseFilter, ...(createdAt && { createdAt }) };
   const [total, items] = await Promise.all([
     Model.countDocuments(filter),
     Model.find(filter).select('-password -pushToken -otpHash -otpExpiry')
