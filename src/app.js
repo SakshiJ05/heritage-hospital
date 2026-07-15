@@ -55,6 +55,31 @@ const dayKey = date => new Intl.DateTimeFormat('en-CA', {
   timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(date);
 
+// Start-of-period boundary in the clinic's timezone, for the "today / this month /
+// this year" filters on the Users and staff tables. Returns null for "all".
+const periodStart = period => {
+  const [y, m, d] = dayKey(new Date()).split('-');
+  if (period === 'today') return new Date(`${y}-${m}-${d}T00:00:00+05:30`);
+  if (period === 'month') return new Date(`${y}-${m}-01T00:00:00+05:30`);
+  if (period === 'year') return new Date(`${y}-01-01T00:00:00+05:30`);
+  return null;
+};
+
+// Shared list handler: filter by created-at period, paginate 20 to a page, and
+// return the slice plus the totals the UI needs for its pager and its count.
+const paginatedList = async (Model, baseFilter, req) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const since = periodStart(req.query.period);
+  const filter = { ...baseFilter, ...(since && { createdAt: { $gte: since } }) };
+  const [total, items] = await Promise.all([
+    Model.countDocuments(filter),
+    Model.find(filter).select('-password -pushToken -otpHash -otpExpiry')
+      .sort('-createdAt').skip((page - 1) * limit).limit(limit),
+  ]);
+  return { items, total, page, pages: Math.max(1, Math.ceil(total / limit)) };
+};
+
 app.get('/api/health', wrap(async (_req, res) =>
   res.json({ ok: true, service: 'heritage-diagnostics-api', orders: await Order.countDocuments() })));
 
@@ -683,6 +708,11 @@ app.get('/api/admin/orders', auth, allow('admin'), wrap(async (req, res) => {
 }));
 
 app.get('/api/admin/staff', auth, allow('admin'), wrap(async (req, res) => {
+  // Paginated + date-filtered when a page/period is asked for; otherwise the plain
+  // full list (the assign flows and availability checks still expect an array).
+  if (req.query.page || req.query.period) {
+    return res.json(await paginatedList(Staff, req.query.role ? { role: req.query.role } : {}, req));
+  }
   const filter = req.query.role ? { role: req.query.role } : {};
   res.json(await Staff.find(filter).select('-password -pushToken').sort('role name'));
 }));
@@ -754,8 +784,8 @@ app.patch('/api/admin/staff/:id', auth, allow('admin'), wrap(async (req, res) =>
   });
 }));
 
-app.get('/api/admin/patients', auth, allow('admin'), wrap(async (_req, res) =>
-  res.json(await Patient.find().select('-otpHash -otpExpiry -pushToken').sort('-createdAt').limit(200))));
+app.get('/api/admin/patients', auth, allow('admin'), wrap(async (req, res) =>
+  res.json(await paginatedList(Patient, {}, req))));
 
 /* --------------------------------------------------------------- errors ---- */
 
