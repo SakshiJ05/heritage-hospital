@@ -450,15 +450,27 @@ app.patch('/api/orders/:id/cash-taken', ...action(['agent'], checklist('cashTake
 app.patch('/api/orders/:id/agent-complete', ...action(['agent'], async (req, res) => {
   ownPickup(req);
   if (!req.order.sampleTaken) throw fail(400, 'sample_required', 'पहले sample लेना ज़रूरी है।');
-  // Cash is only owed on cash orders — an online-paid order must not be blocked here.
-  if (req.order.paymentMode === 'cash' && !req.order.cashTaken) {
+
+  // The agent chose how the patient paid — cash in hand or already online. Trust
+  // that over whatever the order defaulted to, and only demand cash-in-hand when
+  // the agent actually marked it cash.
+  const paymentMode = ['cash', 'online'].includes(req.body.paymentMode)
+    ? req.body.paymentMode
+    : req.order.paymentMode;
+  if (paymentMode === 'cash' && !req.order.cashTaken) {
     throw fail(400, 'cash_required', 'पहले cash लेना ज़रूरी है।');
   }
 
   const order = await moveTo(req.order, STATUS.SAMPLE_COLLECTED, {
     staffId: req.user.id,
     note: 'एजेंट ने sample लिया',
-    mutate: o => { o.labTube = ['EDTA', 'SST', 'FLU'].includes(req.body.labTube) ? req.body.labTube : 'EDTA'; },
+    mutate: o => {
+      o.labTube = ['EDTA', 'SST', 'FLU'].includes(req.body.labTube) ? req.body.labTube : 'EDTA';
+      o.paymentMode = paymentMode;
+      // Online orders are paid the moment they're placed; cash is collected on the
+      // doorstep and tracked by the cashTaken checkbox.
+      o.paymentCollected = paymentMode === 'online' ? true : o.cashTaken;
+    },
   });
 
   const labs = await Staff.find({ role: 'lab', active: true });
