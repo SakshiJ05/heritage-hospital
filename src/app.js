@@ -6,7 +6,7 @@ const cors = require('cors');
 const multer = require('multer');
 const bcrypt = require('bcryptjs');
 
-const { Patient, Staff, Order, OrderStatusHistory, Notification } = require('./models');
+const { Patient, Staff, Order, OrderStatusHistory, Notification, TestCatalog } = require('./models');
 const { sign, auth, allow, hashOtp, compareOtp } = require('./auth');
 const { STATUS, STEPS, QUEUES, stepIndex, ALL_STATUSES } = require('./status');
 const { moveTo, populateOrder } = require('./lifecycle');
@@ -420,18 +420,49 @@ app.patch('/api/orders/:id/pro-call', ...action(['pro', 'admin'], async (req, re
 app.patch('/api/orders/:id/pro-confirm', ...action(['pro', 'admin'], async (req, res) => {
   if (!req.order.proCalled) throw fail(400, 'call_required', 'पहले मरीज़ को कॉल करें।');
 
-  const tests = (Array.isArray(req.body.tests) ? req.body.tests : [])
-    .map(t => String(t).trim()).filter(Boolean);
-  if (!tests.length) throw fail(400, 'tests_required', 'कम से कम एक जांच चुनें।');
+  // Preferred path: the PRO sends catalog test IDs and the server prices them
+  // itself, so the amount can never be typed or tampered with. `otherTests` is the
+  // manual fallback for a test that isn't in the catalog.
+  let testItems = [];
+  let legacyAmount = null;
 
-  const amount = Number(req.body.amount);
-  if (!Number.isFinite(amount) || amount < 0) throw fail(400, 'invalid_amount', 'राशि सही नहीं है।');
+  if (Array.isArray(req.body.testIds) && req.body.testIds.length) {
+    const ids = req.body.testIds.filter(id => /^[a-f0-9]{24}$/i.test(String(id)));
+    const found = await TestCatalog.find({ _id: { $in: ids }, isActive: true });
+    testItems = found.map(c => ({ name: c.name, amount: c.amount }));
+  }
+  if (Array.isArray(req.body.otherTests)) {
+    for (const o of req.body.otherTests) {
+      const name = String(o?.name || '').trim();
+      const amt = Number(o?.amount);
+      if (name && Number.isFinite(amt) && amt >= 0) testItems.push({ name, amount: amt });
+    }
+  }
+
+  // Legacy path: an older app build still sends {tests:[names], amount}. Honour it
+  // so a not-yet-updated phone keeps working.
+  if (!testItems.length && Array.isArray(req.body.tests)) {
+    const names = req.body.tests.map(t => String(t).trim()).filter(Boolean);
+    const amount = Number(req.body.amount);
+    if (names.length && Number.isFinite(amount) && amount >= 0) {
+      testItems = names.map(n => ({ name: n, amount: 0 }));
+      legacyAmount = amount;
+    }
+  }
+
+  if (!testItems.length) throw fail(400, 'tests_required', 'कम से कम एक जांच चुनें।');
+
+  const names = testItems.map(t => t.name);
+  const amount = legacyAmount != null
+    ? legacyAmount
+    : testItems.reduce((sum, t) => sum + (t.amount || 0), 0);
 
   const order = await moveTo(req.order, STATUS.CONFIRMED, {
     staffId: req.user.id,
-    note: `जांच confirm: ${tests.join(', ')} · ₹${amount}`,
+    note: `जांच confirm: ${names.join(', ')} · ₹${amount}`,
     mutate: o => {
-      o.tests = tests;
+      o.tests = names;
+      o.testItems = testItems.map(t => ({ name: t.name, amount: t.amount || 0 }));
       o.amount = amount;
       o.paymentMode = req.body.paymentMode === 'online' ? 'online' : 'cash';
       o.proConfirmed = true;
@@ -804,6 +835,47 @@ app.patch('/api/admin/staff/:id', auth, allow('admin'), wrap(async (req, res) =>
 
 app.get('/api/admin/patients', auth, allow('admin'), wrap(async (req, res) =>
   res.json(await paginatedList(Patient, {}, req))));
+
+/* -------------------------------------------------------- test catalog ---- */
+
+// The PRO's app reads the live price list; the admin manages it. Active-only for
+// everyone except the admin, who asks for ?all=1 to see disabled tests too.
+app.get('/api/test-catalog', auth, allow('pro', 'admin'), wrap(async (req, res) => {
+  const showAll = req.user.role === 'admin' && req.query.all;
+  const filter = showAll ? {} : { isActive: true };
+  res.json(await TestCatalog.find(filter).sort('category name'));
+}));
+
+app.post('/api/admin/test-catalog', auth, allow('admin'), wrap(async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  const amount = Number(req.body.amount);
+  if (name.length < 2) throw fail(400, 'name_required', 'जांच का नाम डालें।');
+  if (!Number.isFinite(amount) || amount < 0) throw fail(400, 'invalid_amount', 'सही रेट डालें।');
+  const test = await TestCatalog.create({ name, category: String(req.body.category || '').trim(), amount });
+  res.status(201).json(test);
+}));
+
+app.patch('/api/admin/test-catalog/:id', auth, allow('admin'), wrap(async (req, res) => {
+  const test = await TestCatalog.findById(req.params.id);
+  if (!test) throw fail(404, 'not_found', 'जांच नहीं मिली।');
+  if (req.body.name !== undefined) test.name = String(req.body.name).trim();
+  if (req.body.category !== undefined) test.category = String(req.body.category).trim();
+  if (req.body.amount !== undefined) {
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || amount < 0) throw fail(400, 'invalid_amount', 'सही रेट डालें।');
+    test.amount = amount;
+  }
+  if (req.body.isActive !== undefined) test.isActive = Boolean(req.body.isActive);
+  await test.save();
+  res.json(test);
+}));
+
+// Soft delete — disable, never remove, so old orders that referenced it stay whole.
+app.delete('/api/admin/test-catalog/:id', auth, allow('admin'), wrap(async (req, res) => {
+  const test = await TestCatalog.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+  if (!test) throw fail(404, 'not_found', 'जांच नहीं मिली।');
+  res.json(test);
+}));
 
 /* --------------------------------------------------------------- errors ---- */
 

@@ -38,7 +38,12 @@ const orderSchema = new mongoose.Schema({
   patient: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true, index: true },
 
   prescriptionUrl: String,
+  // Names kept as a plain array (unchanged) so every old order still renders and
+  // `tests.join(', ')` keeps working everywhere. testItems is the per-test rate
+  // snapshot taken at confirm time — frozen, so editing a catalog rate later never
+  // rewrites a past order's amount.
   tests: [String],
+  testItems: [{ _id: false, name: String, amount: Number }],
   amount: { type: Number, default: 0 },
   paymentMode: { type: String, enum: ['cash', 'online'], default: 'cash' },
   paymentCollected: { type: Boolean, default: false },
@@ -110,11 +115,23 @@ const notificationSchema = new mongoose.Schema({
   read: { type: Boolean, default: false },
 }, { timestamps: true });
 
+// The master price list. The PRO picks tests from this at confirm time and the
+// server sums their rates — the amount is never typed by hand. Soft-deleted
+// (isActive:false) rather than removed, so a test that once priced an old order
+// still resolves for that order's history.
+const testCatalogSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  category: { type: String, default: '', trim: true },
+  amount: { type: Number, required: true, min: 0 },
+  isActive: { type: Boolean, default: true, index: true },
+}, { timestamps: true });
+
 module.exports = {
   Patient: mongoose.model('Patient', patientSchema),
   Staff: mongoose.model('Staff', staffSchema),
   Order: mongoose.model('Order', orderSchema),
   OrderStatusHistory: mongoose.model('OrderStatusHistory', statusHistorySchema),
   Notification: mongoose.model('Notification', notificationSchema),
+  TestCatalog: mongoose.model('TestCatalog', testCatalogSchema),
   Counter,
 };
