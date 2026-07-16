@@ -37,7 +37,11 @@ const orderSchema = new mongoose.Schema({
   orderId: { type: String, unique: true, index: true },
   patient: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', required: true, index: true },
 
+  // A prescription can run to several pages/photos. prescriptionUrls holds them all;
+  // prescriptionUrl stays as the first one so older builds and old orders — which
+  // only ever had a single image — keep rendering unchanged.
   prescriptionUrl: String,
+  prescriptionUrls: [String],
   // Names kept as a plain array (unchanged) so every old order still renders and
   // `tests.join(', ')` keeps working everywhere. testItems is the per-test rate
   // snapshot taken at confirm time — frozen, so editing a catalog rate later never

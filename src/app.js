@@ -253,7 +253,13 @@ app.get('/api/auth/me', auth, wrap(async (req, res) => {
   if (req.user.role === 'user') {
     const patient = await Patient.findById(req.user.id).select('-otpHash -otpExpiry');
     if (!patient) throw fail(404, 'not_found', 'खाता नहीं मिला।');
-    return res.json({ id: patient.id, role: 'user', name: patient.name, voiceGuidance: patient.voiceGuidance });
+    // phone/village/address feed the app's Profile screen. The phone is the login
+    // identity and is never editable from there.
+    return res.json({
+      id: patient.id, role: 'user', name: patient.name,
+      phone: patient.phone, village: patient.village, address: patient.address,
+      voiceGuidance: patient.voiceGuidance, createdAt: patient.createdAt,
+    });
   }
   const staff = await Staff.findById(req.user.id).select('-password');
   if (!staff || !staff.active) throw fail(404, 'not_found', 'खाता नहीं मिला।');
@@ -262,13 +268,21 @@ app.get('/api/auth/me', auth, wrap(async (req, res) => {
 
 /* ------------------------------------------------------- patient orders ---- */
 
-app.post('/api/orders', auth, allow('user'), upload.single('prescription'), wrap(async (req, res) => {
-  if (!req.file) throw fail(400, 'prescription_required', 'पर्ची की फोटो ज़रूरी है।');
+// Up to six pages of a prescription. `any()` rather than a fixed field name so both
+// shapes work: the new app sends several files as `prescriptions`, older builds send
+// exactly one as `prescription`.
+app.post('/api/orders', auth, allow('user'), upload.any(), wrap(async (req, res) => {
+  const files = (req.files || []).filter(f => ['prescription', 'prescriptions'].includes(f.fieldname)).slice(0, 6);
+  if (!files.length) throw fail(400, 'prescription_required', 'पर्ची की फोटो ज़रूरी है।');
+  const urls = files.map(f => `/uploads/${f.filename}`);
 
   const tests = Array.isArray(req.body.tests) ? req.body.tests : (req.body.tests ? [req.body.tests] : []);
   const order = await Order.create({
     patient: req.user.id,
-    prescriptionUrl: `/uploads/${req.file.filename}`,
+    // First image stays in prescriptionUrl so anything that only knows about a
+    // single photo (old app builds, old orders) keeps working.
+    prescriptionUrl: urls[0],
+    prescriptionUrls: urls,
     tests,
     village: req.body.village,
     address: req.body.address,
@@ -635,6 +649,29 @@ app.patch('/api/me/settings', auth, allow('user'), wrap(async (req, res) => {
   res.json({ id: patient.id, name: patient.name, voiceGuidance: patient.voiceGuidance });
 }));
 
+// Set a new password from inside the app. Deliberately separate from /me/settings
+// so a password can never ride along on a profile edit.
+//
+// The current password is NOT required: the caller already holds a valid session
+// token for this account, which is the same proof a login would give. That is the
+// point — a patient who has forgotten their password but is still signed in can fix
+// it themselves instead of being locked out. Signing out everywhere is the trade we
+// accept for that; the token stays valid, so they are not kicked out mid-change.
+app.patch('/api/me/password', auth, allow('user'), wrap(async (req, res) => {
+  const password = String(req.body.password || '');
+  if (password.length < 6) throw fail(400, 'weak_password', 'पासवर्ड कम से कम 6 अक्षर का रखें।');
+
+  const patient = await Patient.findById(req.user.id);
+  if (!patient) throw fail(404, 'not_found', 'खाता नहीं मिला।');
+
+  patient.password = await bcrypt.hash(password, 10);
+  patient.loginAttempts = 0;
+  patient.lockedUntil = undefined;
+  await patient.save();
+
+  res.json({ ok: true });
+}));
+
 /* --------------------------------------------------------------- admin ---- */
 
 app.get('/api/admin/stats/today', auth, allow('admin'), wrap(async (req, res) => {
@@ -833,8 +870,49 @@ app.patch('/api/admin/staff/:id', auth, allow('admin'), wrap(async (req, res) =>
   });
 }));
 
+// Delete a staff account outright. Refused while they are mid-job — an agent
+// holding a sample, a lab with one on the bench — because removing them would
+// strand that order with nobody to finish it. Disable is still the gentler option:
+// it keeps their name on the orders they already handled.
+app.delete('/api/admin/staff/:id', auth, allow('admin'), wrap(async (req, res) => {
+  const staff = await Staff.findById(req.params.id);
+  if (!staff) throw fail(404, 'not_found', 'स्टाफ नहीं मिला।');
+  if (staff.role === 'admin') throw fail(400, 'cannot_delete_admin', 'एडमिन खाता नहीं हटाया जा सकता।');
+
+  const inFlight = await Order.countDocuments({
+    $or: [{ assignedAgent: staff._id }, { pro: staff._id }],
+    status: { $in: [STATUS.AGENT_ASSIGNED, STATUS.SAMPLE_COLLECTED, STATUS.LAB_RECEIVED] },
+  });
+  if (inFlight > 0) {
+    throw fail(409, 'staff_busy', `${staff.name} अभी ${inFlight} ऑर्डर पर काम कर रहे हैं। पहले वो पूरे करें, या खाता बंद (disable) करें।`);
+  }
+
+  await Staff.deleteOne({ _id: staff._id });
+  res.json({ deleted: true });
+}));
+
 app.get('/api/admin/patients', auth, allow('admin'), wrap(async (req, res) =>
   res.json(await paginatedList(Patient, {}, req))));
+
+// Remove a patient for good, along with everything that hangs off them — their
+// orders, those orders' history, and their notifications. Nothing is left behind
+// pointing at a patient that no longer exists. The dashboard warns how many orders
+// go with them before this is called.
+app.delete('/api/admin/patients/:id', auth, allow('admin'), wrap(async (req, res) => {
+  const patient = await Patient.findById(req.params.id);
+  if (!patient) throw fail(404, 'not_found', 'मरीज़ नहीं मिला।');
+
+  const orders = await Order.find({ patient: patient._id }).select('_id');
+  const orderIds = orders.map(o => o._id);
+  await Promise.all([
+    OrderStatusHistory.deleteMany({ order: { $in: orderIds } }),
+    Notification.deleteMany({ patient: patient._id }),
+    Order.deleteMany({ patient: patient._id }),
+  ]);
+  await Patient.deleteOne({ _id: patient._id });
+
+  res.json({ deleted: true, orders: orderIds.length });
+}));
 
 /* -------------------------------------------------------- test catalog ---- */
 
