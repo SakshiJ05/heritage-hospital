@@ -385,6 +385,39 @@ app.get('/api/orders', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(async (
   res.json(req.user.role === 'lab' ? orders.map(labOrderView) : orders);
 }));
 
+// Completed work stays available to the account that handled it. This is a
+// separate endpoint from the live queue so refreshing or signing out can never
+// make finished work appear deleted, while one staff member still cannot browse
+// another staff member's history.
+app.get('/api/orders/history', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(async (req, res) => {
+  const query = {};
+
+  if (req.user.role === 'pro') {
+    query.pro = req.user.id;
+    query.status = { $in: [
+      STATUS.AGENT_ASSIGNED, STATUS.SAMPLE_COLLECTED, STATUS.LAB_RECEIVED,
+      STATUS.REPORT_READY, STATUS.CANCELLED,
+    ] };
+  } else if (req.user.role === 'agent') {
+    query.assignedAgent = req.user.id;
+    query.status = { $in: [
+      STATUS.SAMPLE_COLLECTED, STATUS.LAB_RECEIVED, STATUS.REPORT_READY, STATUS.CANCELLED,
+    ] };
+  } else if (req.user.role === 'lab') {
+    const handledOrderIds = await OrderStatusHistory.distinct('order', {
+      changedByStaff: req.user.id,
+      status: { $in: [STATUS.LAB_RECEIVED, STATUS.REPORT_READY] },
+    });
+    query._id = { $in: handledOrderIds };
+    query.status = { $in: [STATUS.REPORT_READY, STATUS.CANCELLED] };
+  } else {
+    query.status = { $in: [STATUS.REPORT_READY, STATUS.CANCELLED] };
+  }
+
+  const orders = await populateOrder(Order.find(query).sort('-updatedAt').limit(100));
+  res.json(req.user.role === 'lab' ? orders.map(labOrderView) : orders);
+}));
+
 app.get('/api/orders/:id', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(async (req, res) => {
   const order = await populateOrder(Order.findById(req.params.id));
   if (!order) throw fail(404, 'not_found', 'ऑर्डर नहीं मिला।');
@@ -974,14 +1007,25 @@ app.get('/api/test-catalog', auth, allow('pro', 'lab', 'admin'), wrap(async (req
   res.json(tests);
 }));
 
-app.post('/api/admin/test-catalog', auth, allow('admin'), wrap(async (req, res) => {
-  const name = String(req.body.name || '').trim();
-  const amount = Number(req.body.amount);
+const createCatalogTest = async (req, res) => {
+  const body = req.body || {};
+  const name = String(body.name || '').trim();
+  const amount = Number(body.amount);
   if (name.length < 2) throw fail(400, 'name_required', 'जांच का नाम डालें।');
   if (!Number.isFinite(amount) || amount < 0) throw fail(400, 'invalid_amount', 'सही रेट डालें।');
-  const test = await TestCatalog.create({ name, category: String(req.body.category || '').trim(), amount });
-  res.status(201).json(test);
-}));
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (await TestCatalog.exists({ name: { $regex: `^${escapedName}$`, $options: 'i' } })) {
+    throw fail(409, 'test_exists', 'यह जांच पहले से catalog में है।');
+  }
+  const test = await TestCatalog.create({ name, category: String(body.category || '').trim(), amount });
+  res.status(201).json(req.user.role === 'lab'
+    ? { _id: test._id, name: test.name, category: test.category }
+    : test);
+};
+
+// LAB may add a priced test, but cannot edit, disable or delete existing items.
+app.post('/api/test-catalog', auth, allow('lab'), wrap(createCatalogTest));
+app.post('/api/admin/test-catalog', auth, allow('admin'), wrap(createCatalogTest));
 
 app.patch('/api/admin/test-catalog/:id', auth, allow('admin'), wrap(async (req, res) => {
   const test = await TestCatalog.findById(req.params.id);
