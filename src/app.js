@@ -363,13 +363,13 @@ app.get('/api/orders/:id', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(asy
 }));
 
 app.get('/api/staff/agents', auth, allow('pro', 'admin'), wrap(async (req, res) => {
-  // Match agents in the patient's zone, plus anyone whose zone is 'All' — a
-  // small operation often runs one or two agents who cover the whole city, and an
-  // exact-zone-only filter would hide them for every village but the one they were
-  // labelled with, leaving the PRO staring at "no agents".
-  const filter = { role: 'agent', active: true };
-  if (req.query.zone) filter.$or = [{ zone: req.query.zone }, { zone: 'All' }];
-  const agents = await Staff.find(filter).select('-password -pushToken').lean();
+  // Every active agent, whatever their zone. Who goes out is the PRO's call — they
+  // know the round, the traffic and who is nearby — so the server's job is only to
+  // say who is free, not to pre-filter by a zone label. Zone filtering used to hide
+  // the whole roster whenever a village was typed with different capitalisation
+  // from the agent's zone, which is exactly the wrong failure for a dispatch screen.
+  const agents = await Staff.find({ role: 'agent', active: true })
+    .select('-password -pushToken').lean();
 
   // An agent is BUSY while they are carrying an order: from the moment one is
   // assigned to them until the lab has the sample in hand. A busy agent is not

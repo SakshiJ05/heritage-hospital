@@ -1,0 +1,5 @@
+
+# Uploaded prescriptions and reports are patient data. They live on the server's
+# disk (or S3), never in the repository.
+uploads/*
+!uploads/.gitkeep
