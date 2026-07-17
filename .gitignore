@@ -1,3 +1,15 @@
+node_modules/
+
+# Secrets. These belong in Render's Environment tab, never in the repository.
+# .env was committed once already; anything that was in it stays burnt until rotated.
+.env
+.env.*
+!.env.example
+
+# Firebase service account — a private key that can send push to every device and
+# read the whole project. Same rule as .env: Render's env, never the repo.
+firebase-service-account.json
+*-firebase-adminsdk-*.json
 
 # Uploaded prescriptions and reports are patient data. They live on the server's
 # disk (or S3), never in the repository.

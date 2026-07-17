@@ -120,7 +120,15 @@ test('registration requires name, city, address and a password', async () => {
   });
   assert.equal(weak.body.code, 'weak_password');
 
-  const ok = await register('9500000001', { name: 'राम कुमार' });
+  const invalidAge = await api('POST', '/api/auth/register', {
+    body: {
+      phone: '9500000001', name: 'राम', age: 121, village: 'रामनगर',
+      address: 'गली 4, रामनगर', password: PASSWORD,
+    },
+  });
+  assert.equal(invalidAge.body.code, 'invalid_age');
+
+  const ok = await register('9500000001', { name: 'राम कुमार', age: 34 });
   assert.equal(ok.status, 201);
   assert.ok(ok.body.token, 'registration signs you in — no second login step');
   assert.equal(ok.body.user.role, 'user');
@@ -128,8 +136,28 @@ test('registration requires name, city, address and a password', async () => {
   // The profile is actually stored — the agent needs somewhere to go.
   const saved = await Patient.findOne({ phone: '9500000001' });
   assert.equal(saved.name, 'राम कुमार');
+  assert.equal(saved.age, 34);
   assert.equal(saved.village, 'रामनगर');
   assert.ok(saved.address.length > 5);
+
+  const profile = await api('GET', '/api/auth/me', { token: ok.body.token });
+  assert.equal(profile.status, 200);
+  assert.equal(profile.body.age, 34);
+  assert.ok(profile.body.address);
+
+  const edited = await api('PATCH', '/api/me/settings', {
+    token: ok.body.token,
+    body: { age: 35, address: 'नया पता, रामनगर, वाराणसी' },
+  });
+  assert.equal(edited.status, 200);
+  assert.equal(edited.body.age, 35);
+  assert.equal(edited.body.address, 'नया पता, रामनगर, वाराणसी');
+
+  const badEdit = await api('PATCH', '/api/me/settings', {
+    token: ok.body.token, body: { age: -1 },
+  });
+  assert.equal(badEdit.status, 400);
+  assert.equal(badEdit.body.code, 'invalid_age');
 
   const twice = await register('9500000001');
   assert.equal(twice.status, 409, 'a registered number cannot register again');
@@ -277,9 +305,25 @@ test('an order walks the full pipeline across all four staff roles', async () =>
   assert.equal(collected.body.status, STATUS.SAMPLE_COLLECTED, 'sample_collected must actually be reached');
 
   // --- lab: receive, then upload the report -----------------------------------
+  // Even a crafted status query is pinned to the LAB queue, and the payload is
+  // redacted at the API boundary rather than merely hidden by the web page.
+  const labQueue = await api('GET', '/api/orders?status=submitted', { token: lab });
+  assert.equal(labQueue.status, 200);
+  const labOrder = labQueue.body.find(order => order._id === id);
+  assert.ok(labOrder, 'collected sample must appear in the LAB queue');
+  assert.deepEqual(labOrder.tests, ['CBC', 'Blood Sugar (Fasting)']);
+  assert.equal(labOrder.labTube, 'EDTA');
+  assert.ok(labOrder.patient?.name, 'LAB needs the patient name to match the sample');
+  for (const privateField of ['amount', 'prescriptionUrl', 'assignedAgent', 'pro', 'pickupSlot']) {
+    assert.equal(labOrder[privateField], undefined, `LAB must not receive ${privateField}`);
+  }
+  assert.equal(labOrder.patient.phone, undefined, 'LAB must not receive patient contact details');
+  assert.equal(labOrder.patient.address, undefined, 'LAB must not receive patient address');
+
   const received = await api('PATCH', `/api/orders/${id}/lab-confirm`, { token: lab });
   assert.equal(received.status, 200);
   assert.equal(received.body.status, STATUS.LAB_RECEIVED);
+  assert.equal(received.body.amount, undefined, 'LAB action responses stay redacted too');
 
   const report = await api('POST', `/api/orders/${id}/upload-report`, {
     token: lab,
@@ -288,6 +332,21 @@ test('an order walks the full pipeline across all four staff roles', async () =>
   assert.equal(report.status, 200);
   assert.equal(report.body.status, STATUS.REPORT_READY);
   assert.ok(report.body.reportUrl?.startsWith('/uploads/'), 'report is a stored file, not a client URL');
+
+  const oldLabOrder = await api('GET', `/api/orders/${id}`, { token: lab });
+  assert.equal(oldLabOrder.status, 403, 'LAB cannot browse orders after they leave its queue');
+
+  // Finished work remains in the particular staff account's History panel.
+  for (const [role, token] of [['pro', pro], ['agent', agent], ['lab', lab]]) {
+    const staffHistory = await api('GET', '/api/orders/history', { token });
+    assert.equal(staffHistory.status, 200);
+    assert.ok(staffHistory.body.some(order => order._id === id), `${role} must retain its completed order`);
+    if (role === 'lab') {
+      const historical = staffHistory.body.find(order => order._id === id);
+      assert.equal(historical.amount, undefined, 'LAB history remains redacted');
+      assert.equal(historical.patient.phone, undefined, 'LAB history hides patient contact details');
+    }
+  }
 
   // --- the audit trail the patient tracker reads --------------------------------
   const history = await api('GET', `/api/orders/${id}/status-history`, { token: patient });
@@ -423,6 +482,39 @@ test('only an admin can create staff — nobody can make themselves a PRO', asyn
     body: { username: 'intruder', password: 'hacked1' },
   });
   assert.equal(locked.status, 401);
+});
+
+test('LAB can add and search tests without receiving edit or delete access', async () => {
+  const admin = await staffToken('admin', 'admin123');
+  const lab = await staffToken('lab', 'lab123');
+
+  const created = await api('POST', '/api/admin/test-catalog', {
+    token: admin,
+    body: { name: 'CBC', category: 'Blood Test', amount: 300 },
+  });
+  assert.equal(created.status, 201);
+
+  const addedByLab = await api('POST', '/api/test-catalog', {
+    token: lab,
+    body: { name: 'Lipid Profile', category: 'Blood Test', amount: 650 },
+  });
+  assert.equal(addedByLab.status, 201);
+  assert.equal(addedByLab.body.name, 'Lipid Profile');
+  assert.equal(addedByLab.body.amount, undefined, 'LAB create response stays restricted');
+
+  const catalog = await api('GET', '/api/test-catalog', { token: lab });
+  assert.equal(catalog.status, 200);
+  const cbc = catalog.body.find(testItem => testItem.name === 'CBC');
+  assert.ok(cbc);
+  assert.equal(cbc.category, 'Blood Test');
+  assert.equal(cbc.amount, undefined, 'LAB must not receive test rates');
+  assert.equal(cbc.isActive, undefined, 'LAB must not receive management fields');
+  assert.ok(catalog.body.some(testItem => testItem.name === 'Lipid Profile'));
+
+  const forbidden = await api('PATCH', `/api/admin/test-catalog/${created.body._id}`, {
+    token: lab, body: { name: 'Changed' },
+  });
+  assert.equal(forbidden.status, 403, 'LAB catalog access is read-only');
 });
 
 test('an agent already out on a pickup cannot be given another', async () => {

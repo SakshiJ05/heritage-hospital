@@ -4,6 +4,7 @@ const { ALL_STATUSES, STATUS } = require('./status');
 const patientSchema = new mongoose.Schema({
   phone: { type: String, unique: true, required: true, index: true },
   name: { type: String, default: 'ग्राहक' },
+  age: { type: Number, min: 0, max: 120 },
   village: String,
   address: String,
 
