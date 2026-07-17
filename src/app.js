@@ -157,12 +157,16 @@ const patientSession = patient => ({
 app.post('/api/auth/register', wrap(async (req, res) => {
   const phone = String(req.body.phone || '').replace(/\D/g, '');
   const name = String(req.body.name || '').trim();
+  const age = req.body.age === undefined || req.body.age === '' ? undefined : Number(req.body.age);
   const village = String(req.body.village || '').trim();
   const address = String(req.body.address || '').trim();
   const password = String(req.body.password || '');
 
   if (!isValidPhone(phone)) throw fail(400, 'invalid_phone', INVALID_PHONE_MSG);
   if (name.length < 2) throw fail(400, 'name_required', 'अपना पूरा नाम डालें।');
+  if (age !== undefined && (!Number.isInteger(age) || age < 0 || age > 120)) {
+    throw fail(400, 'invalid_age', 'सही उम्र डालें (0 से 120 साल)।');
+  }
   if (!village) throw fail(400, 'village_required', 'अपना शहर / गाँव डालें।');
   if (address.length < 5) throw fail(400, 'address_required', 'पूरा पता डालें ताकि एजेंट पहुँच सके।');
   if (password.length < 6) throw fail(400, 'weak_password', 'पासवर्ड कम से कम 6 अक्षर का रखें।');
@@ -174,6 +178,7 @@ app.post('/api/auth/register', wrap(async (req, res) => {
 
   const patient = existing || new Patient({ phone });
   patient.name = name;
+  if (age !== undefined) patient.age = age;
   patient.village = village;
   patient.address = address;
   patient.password = await bcrypt.hash(password, 10);
@@ -281,7 +286,7 @@ app.get('/api/auth/me', auth, wrap(async (req, res) => {
     // identity and is never editable from there.
     return res.json({
       id: patient.id, role: 'user', name: patient.name,
-      phone: patient.phone, village: patient.village, address: patient.address,
+      phone: patient.phone, age: patient.age, village: patient.village, address: patient.address,
       voiceGuidance: patient.voiceGuidance, createdAt: patient.createdAt,
     });
   }
@@ -715,11 +720,22 @@ app.patch('/api/me/settings', auth, allow('user'), wrap(async (req, res) => {
   if (!patient) throw fail(404, 'not_found', 'खाता नहीं मिला।');
   if (req.body.voiceGuidance !== undefined) patient.voiceGuidance = Boolean(req.body.voiceGuidance);
   if (req.body.name) patient.name = String(req.body.name).trim();
+  if (req.body.age !== undefined) {
+    const age = Number(req.body.age);
+    if (!Number.isInteger(age) || age < 0 || age > 120) {
+      throw fail(400, 'invalid_age', 'सही उम्र डालें (0 से 120 साल)।');
+    }
+    patient.age = age;
+  }
   if (req.body.village !== undefined) patient.village = req.body.village;
   if (req.body.address !== undefined) patient.address = req.body.address;
   if (req.body.pushToken) patient.pushToken = req.body.pushToken;
   await patient.save();
-  res.json({ id: patient.id, name: patient.name, voiceGuidance: patient.voiceGuidance });
+  res.json({
+    id: patient.id, name: patient.name, age: patient.age,
+    village: patient.village, address: patient.address,
+    voiceGuidance: patient.voiceGuidance,
+  });
 }));
 
 // Set a new password from inside the app. Deliberately separate from /me/settings
