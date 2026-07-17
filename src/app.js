@@ -40,6 +40,29 @@ app.use('/uploads', express.static(uploadRoot));
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const fail = (status, code, message) => Object.assign(new Error(code), { status, code, message });
 
+// LAB accounts need enough data to identify a sample and prepare its report, but
+// not the admin/PRO view of the patient. Keep this restriction on the server (not
+// merely hidden in the web UI), so a LAB user cannot recover phone, address,
+// amount, prescription or staff details from the browser's Network panel.
+const labOrderView = order => {
+  if (!order) return order;
+  const plain = typeof order.toObject === 'function' ? order.toObject() : order;
+  const patient = plain.patient && typeof plain.patient === 'object'
+    ? { _id: plain.patient._id, name: plain.patient.name }
+    : undefined;
+  return {
+    _id: plain._id,
+    orderId: plain.orderId,
+    status: plain.status,
+    tests: plain.tests || [],
+    patient,
+    labTube: plain.labTube,
+    reportUrl: plain.reportUrl,
+    createdAt: plain.createdAt,
+    updatedAt: plain.updatedAt,
+  };
+};
+
 // A real Indian mobile number: exactly ten digits, and the first is 6-9. Every
 // live SIM-issued mobile falls in that range, so this rejects the junk that a plain
 // length check waves through — 0000000000, 1234567890, a landline STD code — while
@@ -238,7 +261,8 @@ app.post('/api/auth/verify-otp', wrap(async (req, res) => {
 }));
 
 app.post('/api/auth/staff-login', wrap(async (req, res) => {
-  const staff = await Staff.findOne({ username: String(req.body.username || '').trim(), active: true });
+  const username = String(req.body.username || '').trim().toLowerCase();
+  const staff = await Staff.findOne({ username, active: true });
   if (!staff || !await bcrypt.compare(String(req.body.password || ''), staff.password)) {
     throw fail(401, 'invalid_credentials', 'गलत username या password।');
   }
@@ -322,6 +346,9 @@ app.get('/api/orders/:id/status-history', auth, wrap(async (req, res) => {
   if (req.user.role === 'user' && String(order.patient) !== req.user.id) {
     throw fail(403, 'forbidden', 'आपके पास अनुमति नहीं है।');
   }
+  if (req.user.role === 'lab' && !QUEUES.lab.includes(order.status)) {
+    throw fail(403, 'forbidden', 'यह ऑर्डर LAB queue में नहीं है।');
+  }
   const history = await OrderStatusHistory.find({ order: order._id })
     .populate('changedByStaff', 'name role')
     .sort('timestamp');
@@ -333,7 +360,11 @@ app.get('/api/orders/:id/status-history', auth, wrap(async (req, res) => {
 app.get('/api/orders', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(async (req, res) => {
   const query = {};
 
-  if (req.query.status) {
+  // A LAB token is always pinned to the LAB queue. Supplying a different `status`
+  // query must not turn this endpoint into a way to browse every order.
+  if (req.user.role === 'lab') {
+    query.status = { $in: QUEUES.lab };
+  } else if (req.query.status) {
     const requested = String(req.query.status).split(',').filter(s => ALL_STATUSES.includes(s));
     if (requested.length) query.status = { $in: requested };
   } else if (QUEUES[req.user.role]) {
@@ -350,7 +381,8 @@ app.get('/api/orders', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(async (
     query.createdAt = { $gte: start };
   }
 
-  res.json(await populateOrder(Order.find(query).sort('-createdAt').limit(Number(req.query.limit) || 100)));
+  const orders = await populateOrder(Order.find(query).sort('-createdAt').limit(Number(req.query.limit) || 100));
+  res.json(req.user.role === 'lab' ? orders.map(labOrderView) : orders);
 }));
 
 app.get('/api/orders/:id', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(async (req, res) => {
@@ -359,7 +391,10 @@ app.get('/api/orders/:id', auth, allow('pro', 'agent', 'lab', 'admin'), wrap(asy
   if (req.user.role === 'agent' && String(order.assignedAgent?._id) !== req.user.id) {
     throw fail(403, 'forbidden', 'यह pickup आपका नहीं है।');
   }
-  res.json(order);
+  if (req.user.role === 'lab' && !QUEUES.lab.includes(order.status)) {
+    throw fail(403, 'forbidden', 'यह ऑर्डर LAB queue में नहीं है।');
+  }
+  res.json(req.user.role === 'lab' ? labOrderView(order) : order);
 }));
 
 app.get('/api/staff/agents', auth, allow('pro', 'admin'), wrap(async (req, res) => {
@@ -539,11 +574,16 @@ app.patch('/api/orders/:id/agent-complete', ...action(['agent'], async (req, res
   ownPickup(req);
   if (!req.order.sampleTaken) throw fail(400, 'sample_required', 'पहले sample लेना ज़रूरी है।');
 
+  // Some clients legitimately send no JSON body here (the order already carries
+  // the default payment mode). Express leaves req.body undefined in that case;
+  // reading paymentMode from it used to throw a 500 and strand completed work.
+  const body = req.body || {};
+
   // The agent chose how the patient paid — cash in hand or already online. Trust
   // that over whatever the order defaulted to, and only demand cash-in-hand when
   // the agent actually marked it cash.
-  const paymentMode = ['cash', 'online'].includes(req.body.paymentMode)
-    ? req.body.paymentMode
+  const paymentMode = ['cash', 'online'].includes(body.paymentMode)
+    ? body.paymentMode
     : req.order.paymentMode;
   if (paymentMode === 'cash' && !req.order.cashTaken) {
     throw fail(400, 'cash_required', 'पहले cash लेना ज़रूरी है।');
@@ -553,7 +593,7 @@ app.patch('/api/orders/:id/agent-complete', ...action(['agent'], async (req, res
     staffId: req.user.id,
     note: 'एजेंट ने sample लिया',
     mutate: o => {
-      o.labTube = ['EDTA', 'SST', 'FLU'].includes(req.body.labTube) ? req.body.labTube : 'EDTA';
+      o.labTube = ['EDTA', 'SST', 'FLU'].includes(body.labTube) ? body.labTube : 'EDTA';
       o.paymentMode = paymentMode;
       // Online orders are paid the moment they're placed; cash is collected on the
       // doorstep and tracked by the cashTaken checkbox.
@@ -577,7 +617,7 @@ app.patch('/api/orders/:id/lab-confirm', ...action(['lab', 'admin'], async (req,
     note: 'लैब को sample मिला',
     mutate: o => { o.labReceivedAt = new Date(); },
   });
-  res.json(order);
+  res.json(req.user.role === 'lab' ? labOrderView(order) : order);
 }));
 
 // Report upload. Takes a real file — the old endpoint accepted any client-supplied
@@ -591,7 +631,7 @@ app.post('/api/orders/:id/upload-report',
       note: 'रिपोर्ट अपलोड हुई',
       mutate: o => { o.reportUrl = `/uploads/${req.file.filename}`; },
     });
-    res.json(order);
+    res.json(req.user.role === 'lab' ? labOrderView(order) : order);
   }));
 
 app.patch('/api/orders/:id/cancel', ...action(['pro', 'admin'], async (req, res) => {
@@ -918,10 +958,20 @@ app.delete('/api/admin/patients/:id', auth, allow('admin'), wrap(async (req, res
 
 // The PRO's app reads the live price list; the admin manages it. Active-only for
 // everyone except the admin, who asks for ?all=1 to see disabled tests too.
-app.get('/api/test-catalog', auth, allow('pro', 'admin'), wrap(async (req, res) => {
+app.get('/api/test-catalog', auth, allow('pro', 'lab', 'admin'), wrap(async (req, res) => {
   const showAll = req.user.role === 'admin' && req.query.all;
   const filter = showAll ? {} : { isActive: true };
-  res.json(await TestCatalog.find(filter).sort('category name'));
+  const tests = await TestCatalog.find(filter).sort('category name');
+  // LAB only needs the reference names/categories. Rates and management fields
+  // remain an Admin/PRO concern and are omitted at the API boundary.
+  if (req.user.role === 'lab') {
+    return res.json(tests.map(test => ({
+      _id: test._id,
+      name: test.name,
+      category: test.category,
+    })));
+  }
+  res.json(tests);
 }));
 
 app.post('/api/admin/test-catalog', auth, allow('admin'), wrap(async (req, res) => {
