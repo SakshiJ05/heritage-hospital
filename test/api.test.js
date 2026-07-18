@@ -281,11 +281,26 @@ test('an order walks the full pipeline across all four staff roles', async () =>
   });
   assert.equal(assigned.status, 200);
   assert.equal(assigned.body.status, STATUS.AGENT_ASSIGNED);
+  assert.equal(assigned.body.pickupSlot, '10:00–12:00', 'assigned pickup keeps the PRO-selected slot');
 
-  // --- agent: the two checkboxes gate completion -------------------------------
   const agentUsername = (await Staff.findById(agentId)).username;
   const agent = await staffToken(agentUsername, `${agentUsername}123`);
+  const assignedAgentQueue = await api('GET', '/api/orders', { token: agent });
+  assert.equal(
+    assignedAgentQueue.body.find(order => order._id === id)?.pickupSlot,
+    '10:00–12:00',
+    'agent queue receives the selected pickup slot',
+  );
 
+  const activeProHistory = await api('GET', '/api/orders/history', { token: pro });
+  assert.equal(activeProHistory.status, 200);
+  assert.equal(
+    activeProHistory.body.some(order => order._id === id),
+    false,
+    'an active pickup must not appear under Past orders in the PRO panel',
+  );
+
+  // --- agent: the two checkboxes gate completion -------------------------------
   const premature = await api('PATCH', `/api/orders/${id}/agent-complete`, { token: agent });
   assert.equal(premature.status, 400, 'cannot complete before taking the sample');
   assert.equal(premature.body.code, 'sample_required');

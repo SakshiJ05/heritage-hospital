@@ -399,10 +399,10 @@ app.get('/api/orders/history', auth, allow('pro', 'agent', 'lab', 'admin'), wrap
 
   if (req.user.role === 'pro') {
     query.pro = req.user.id;
-    query.status = { $in: [
-      STATUS.AGENT_ASSIGNED, STATUS.SAMPLE_COLLECTED, STATUS.LAB_RECEIVED,
-      STATUS.REPORT_READY, STATUS.CANCELLED,
-    ] };
+    // "Past orders" must mean the order itself is over. Assigning an agent only
+    // hands off an in-progress order; showing it here made a brand-new pickup look
+    // historical in the PRO panel.
+    query.status = { $in: [STATUS.REPORT_READY, STATUS.CANCELLED] };
   } else if (req.user.role === 'agent') {
     query.assignedAgent = req.user.id;
     query.status = { $in: [
