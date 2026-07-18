@@ -1037,13 +1037,14 @@ app.get('/api/test-catalog', auth, allow('pro', 'lab', 'admin'), wrap(async (req
   const showAll = req.user.role === 'admin' && req.query.all;
   const filter = showAll ? {} : { isActive: true };
   const tests = await TestCatalog.find(filter).sort('category name');
-  // LAB only needs the reference names/categories. Rates and management fields
-  // remain an Admin/PRO concern and are omitted at the API boundary.
+  // LAB maintains the working test catalog too, so it needs the current rate in
+  // order to add or correct a test from its restricted desktop.
   if (req.user.role === 'lab') {
     return res.json(tests.map(test => ({
       _id: test._id,
       name: test.name,
       category: test.category,
+      amount: test.amount,
     })));
   }
   res.json(tests);
@@ -1061,28 +1062,43 @@ const createCatalogTest = async (req, res) => {
   }
   const test = await TestCatalog.create({ name, category: String(body.category || '').trim(), amount });
   res.status(201).json(req.user.role === 'lab'
-    ? { _id: test._id, name: test.name, category: test.category }
+    ? { _id: test._id, name: test.name, category: test.category, amount: test.amount }
     : test);
 };
 
-// LAB may add a priced test, but cannot edit, disable or delete existing items.
+// LAB may maintain names/categories/rates, but disabling remains an Admin action.
 app.post('/api/test-catalog', auth, allow('lab'), wrap(createCatalogTest));
 app.post('/api/admin/test-catalog', auth, allow('admin'), wrap(createCatalogTest));
 
-app.patch('/api/admin/test-catalog/:id', auth, allow('admin'), wrap(async (req, res) => {
+const updateCatalogTest = allowActive => async (req, res) => {
   const test = await TestCatalog.findById(req.params.id);
   if (!test) throw fail(404, 'not_found', 'जांच नहीं मिली।');
-  if (req.body.name !== undefined) test.name = String(req.body.name).trim();
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name).trim();
+    if (name.length < 2) throw fail(400, 'name_required', 'जांच का नाम डालें।');
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const duplicate = await TestCatalog.exists({
+      _id: { $ne: test._id },
+      name: { $regex: `^${escapedName}$`, $options: 'i' },
+    });
+    if (duplicate) throw fail(409, 'test_exists', 'यह जांच पहले से catalog में है।');
+    test.name = name;
+  }
   if (req.body.category !== undefined) test.category = String(req.body.category).trim();
   if (req.body.amount !== undefined) {
     const amount = Number(req.body.amount);
     if (!Number.isFinite(amount) || amount < 0) throw fail(400, 'invalid_amount', 'सही रेट डालें।');
     test.amount = amount;
   }
-  if (req.body.isActive !== undefined) test.isActive = Boolean(req.body.isActive);
+  if (allowActive && req.body.isActive !== undefined) test.isActive = Boolean(req.body.isActive);
   await test.save();
-  res.json(test);
-}));
+  res.json(req.user.role === 'lab'
+    ? { _id: test._id, name: test.name, category: test.category, amount: test.amount }
+    : test);
+};
+
+app.patch('/api/test-catalog/:id', auth, allow('lab'), wrap(updateCatalogTest(false)));
+app.patch('/api/admin/test-catalog/:id', auth, allow('admin'), wrap(updateCatalogTest(true)));
 
 // Soft delete — disable, never remove, so old orders that referenced it stay whole.
 app.delete('/api/admin/test-catalog/:id', auth, allow('admin'), wrap(async (req, res) => {

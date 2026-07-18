@@ -499,7 +499,7 @@ test('only an admin can create staff — nobody can make themselves a PRO', asyn
   assert.equal(locked.status, 401);
 });
 
-test('LAB can add and search tests without receiving edit or delete access', async () => {
+test('LAB can add, search and edit test names and rates without disable access', async () => {
   const admin = await staffToken('admin', 'admin123');
   const lab = await staffToken('lab', 'lab123');
 
@@ -515,21 +515,30 @@ test('LAB can add and search tests without receiving edit or delete access', asy
   });
   assert.equal(addedByLab.status, 201);
   assert.equal(addedByLab.body.name, 'Lipid Profile');
-  assert.equal(addedByLab.body.amount, undefined, 'LAB create response stays restricted');
+  assert.equal(addedByLab.body.amount, 650, 'LAB sees the rate it maintains');
 
   const catalog = await api('GET', '/api/test-catalog', { token: lab });
   assert.equal(catalog.status, 200);
   const cbc = catalog.body.find(testItem => testItem.name === 'CBC');
   assert.ok(cbc);
   assert.equal(cbc.category, 'Blood Test');
-  assert.equal(cbc.amount, undefined, 'LAB must not receive test rates');
+  assert.equal(cbc.amount, 300, 'LAB catalog includes editable rates');
   assert.equal(cbc.isActive, undefined, 'LAB must not receive management fields');
   assert.ok(catalog.body.some(testItem => testItem.name === 'Lipid Profile'));
 
-  const forbidden = await api('PATCH', `/api/admin/test-catalog/${created.body._id}`, {
-    token: lab, body: { name: 'Changed' },
+  const edited = await api('PATCH', `/api/test-catalog/${created.body._id}`, {
+    token: lab, body: { name: 'CBC with Differential', category: 'Haematology', amount: 425 },
   });
-  assert.equal(forbidden.status, 403, 'LAB catalog access is read-only');
+  assert.equal(edited.status, 200);
+  assert.equal(edited.body.name, 'CBC with Differential');
+  assert.equal(edited.body.category, 'Haematology');
+  assert.equal(edited.body.amount, 425);
+  assert.equal(edited.body.isActive, undefined, 'LAB edit response keeps management fields private');
+
+  const forbiddenAdminRoute = await api('PATCH', `/api/admin/test-catalog/${created.body._id}`, {
+    token: lab, body: { isActive: false },
+  });
+  assert.equal(forbiddenAdminRoute.status, 403, 'LAB still cannot use Admin disable controls');
 });
 
 test('an agent already out on a pickup cannot be given another', async () => {

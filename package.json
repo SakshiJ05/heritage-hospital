@@ -10,6 +10,7 @@
     "dev:memory": "node src/dev-server.js",
     "start": "node src/server.js",
     "seed": "node seed.js",
+    "sync-tests": "node sync-tests.js",
     "test": "node --test"
   },
   "dependencies": {

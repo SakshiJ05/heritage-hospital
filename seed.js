@@ -21,23 +21,7 @@ const bcrypt = require('bcryptjs');
 
 const { Patient, Staff, Order, OrderStatusHistory, Notification, TestCatalog, Counter } = require('./src/models');
 const { configureDns } = require('./src/dns');
-
-// A starter price list so the PRO's picker isn't empty on day one. Seeded only when
-// the catalog is empty, and the admin can edit/add/disable any of it in the panel.
-const SAMPLE_TESTS = [
-  { name: 'CBC (Complete Blood Count)', category: 'Blood Test', amount: 300 },
-  { name: 'Blood Sugar (Fasting)', category: 'Blood Test', amount: 150 },
-  { name: 'Blood Sugar (PP)', category: 'Blood Test', amount: 150 },
-  { name: 'HbA1c', category: 'Blood Test', amount: 450 },
-  { name: 'Lipid Profile', category: 'Profile', amount: 500 },
-  { name: 'Thyroid Profile (T3 T4 TSH)', category: 'Profile', amount: 650 },
-  { name: 'Liver Function Test (LFT)', category: 'Profile', amount: 600 },
-  { name: 'Kidney Function Test (KFT)', category: 'Profile', amount: 600 },
-  { name: 'Vitamin D', category: 'Blood Test', amount: 1200 },
-  { name: 'Vitamin B12', category: 'Blood Test', amount: 900 },
-  { name: 'Chest X-Ray', category: 'Radiology', amount: 400 },
-  { name: 'ECG', category: 'Cardiology', amount: 300 },
-];
+const { syncStandardTests } = require('./src/standard-tests');
 
 async function run() {
   if (!process.env.MONGODB_URI) throw new Error('MONGODB_URI is required');
@@ -79,11 +63,10 @@ async function run() {
     console.log('  Database is now empty.\n');
   }
 
-  // Seed the price list once (skipped if the admin has already built their own).
-  if (await TestCatalog.countDocuments() === 0) {
-    await TestCatalog.insertMany(SAMPLE_TESTS);
-    console.log(`Test catalog seeded with ${SAMPLE_TESTS.length} sample tests.`);
-  }
+  // Insert only missing standard tests. Existing Admin-edited records are sacred:
+  // never overwrite their rate/category or reactivate a deliberately disabled test.
+  const catalog = await syncStandardTests(TestCatalog);
+  console.log(`Test catalog synced: ${catalog.added} added, ${catalog.total} total.`);
 
   const existing = await Staff.findOne({ username });
   if (existing) {
